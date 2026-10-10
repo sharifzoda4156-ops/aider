@@ -29,3 +29,4 @@ git cherry-pick -x <sha>                    # только нужное
 - Черри-пики `c0ab7537`, `c0839cf3`, `55164933`: убраны устаревшие модели из тестов (апстримные тесты на 0.86.2 падали).
 - Удалены апстримные release/docker/pages/schedule-workflow, добавлен `johan-ci.yml`.
 - `johan/jae_smoke.py` — сборка Coder как в JAE без LLM.
+- Черри-пик `975e5a89`: Python 3.13/3.14 (`requires-python <3.15`, numpy 2.x / scipy 1.16+ на Python ≥3.11). CI гоняет 3.12 и 3.13.
