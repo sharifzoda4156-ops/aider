@@ -1,0 +1,53 @@
+name: Johan fork CI
+
+# Форк Aider для JAE. Апстримные release/docker/pages/schedule-workflow удалены:
+# мы не публикуем на PyPI, JAE ставит пакет из git-тега vX.Y.Z+johan.N.
+on:
+  push:
+    branches: [johan]
+    tags: ["v*+johan.*"]
+  pull_request:
+    branches: [johan]
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        # 3.12 — как VPS JAE. 3.13 добавить вместе с черри-пиком 975e5a89.
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libportaudio2
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          pip install .
+
+      - name: Version from tag
+        run: python -c "import aider; print(aider.__version__)"
+
+      - name: Upstream tests
+        env:
+          AIDER_ANALYTICS: false
+        run: pytest tests/basic
+
+      - name: JAE smoke
+        run: |
+          git config --global user.name "JAE CI"
+          git config --global user.email "ci@johan.systems"
+          python johan/jae_smoke.py
