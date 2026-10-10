@@ -1,4 +1,5 @@
 import colorsys
+import hashlib
 import math
 import os
 import random
@@ -18,6 +19,9 @@ from pygments.token import Token
 from tqdm import tqdm
 from tree_sitter import Query
 
+from aider.repomap_scope import infer_scope, read_scope, scope_rank
+from aider.symbol_cache import SymbolCache, cache_key, parser_identity
+from aider.repomap_budget import bound_map, read_map_limit
 from aider.dump import dump
 from aider.special import filter_important_files
 from aider.waiting import Spinner
@@ -55,16 +59,37 @@ class RepoMap:
         max_context_window=None,
         map_mul_no_files=8,
         refresh="auto",
+        map_token_limit=None,
+        scope_paths=None,
     ):
         self.io = io
         self.verbose = verbose
         self.refresh = refresh
+        self.scope_paths = read_scope(scope_paths)
+        self.last_scope_metrics = None
+        self.map_token_limit = read_map_limit(map_token_limit)
+        self.last_map_metrics = None
 
         if not root:
             root = os.getcwd()
         self.root = root
 
         self.load_tags_cache()
+        self.symbol_cache = None
+        self.symbol_parser_identity = None
+        self.symbol_implementation = None
+        shared_dir = os.environ.get("AIDER_SYMBOL_CACHE_DIR")
+        if shared_dir:
+            try:
+                cache_path = Path(shared_dir).expanduser().resolve()
+                if cache_path == Path(self.root).resolve() or Path(self.root).resolve() in cache_path.parents:
+                    raise ValueError("shared cache must be outside the repository")
+                self.symbol_cache = SymbolCache(cache_path)
+                self.symbol_parser_identity = parser_identity()
+                self.symbol_implementation = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+            except (OSError, sqlite3.Error, ValueError):
+                self.symbol_cache = None
+                self.io.tool_warning("Shared symbol cache unavailable; parsing files directly")
         self.cache_threshold = 0.95
 
         self.max_map_tokens = map_tokens
@@ -108,7 +133,10 @@ class RepoMap:
         mentioned_idents=None,
         force_refresh=False,
     ):
-        if self.max_map_tokens <= 0:
+        started = time.perf_counter()
+        self.last_map_metrics = None
+        self.last_scope_metrics = None
+        if self.max_map_tokens <= 0 or self.map_token_limit == 0:
             return
         if not other_files:
             return
@@ -130,6 +158,9 @@ class RepoMap:
             target = 0
         if not chat_files and self.max_context_window and target > 0:
             max_map_tokens = target
+
+        if self.map_token_limit is not None:
+            max_map_tokens = min(max_map_tokens, self.map_token_limit)
 
         try:
             files_listing = self.get_ranked_tags_map(
@@ -162,7 +193,25 @@ class RepoMap:
         else:
             repo_content = ""
 
-        repo_content += files_listing
+        if self.map_token_limit is not None:
+            repo_content, actual_tokens, clipped = bound_map(
+                repo_content, files_listing, self.map_token_limit, self.main_model.token_count
+            )
+            self.last_map_metrics = {
+                "base_budget": self.max_map_tokens,
+                "effective_budget": max_map_tokens,
+                "hard_limit": self.map_token_limit,
+                "actual_tokens": actual_tokens,
+                "clipped": clipped,
+                "files_considered": len(set(chat_files).union(other_files)),
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+            }
+            if self.verbose:
+                self.io.tool_output(f"Repo-map budget: {self.last_map_metrics}")
+            if not repo_content:
+                return
+        else:
+            repo_content += files_listing
 
         return repo_content
 
@@ -231,6 +280,8 @@ class RepoMap:
             self.io.tool_warning(f"File not found error: {fname}")
 
     def get_tags(self, fname, rel_fname):
+        if self.symbol_cache is not None:
+            return self.get_shared_tags(fname, rel_fname)
         # Check if the file is in the cache and if the modification time has not changed
         file_mtime = self.get_mtime(fname)
         if file_mtime is None:
@@ -261,6 +312,28 @@ class RepoMap:
             self.tags_cache_error(e)
             self.TAGS_CACHE[cache_key] = {"mtime": file_mtime, "data": data}
 
+        return data
+
+    def get_shared_tags(self, fname, rel_fname):
+        # Content is re-read even when mtime is unchanged. Paths are rebound on hits.
+        code = self.io.read_text(fname)
+        lang = filename_to_lang(fname)
+        query_path = get_scm_fname(lang) if lang else None
+        if code is None or not query_path or not query_path.exists():
+            return list(self.get_tags_raw(fname, rel_fname))
+        try:
+            query = query_path.read_text()
+            key = cache_key(code, lang, query, Path(fname).name,
+                            self.symbol_parser_identity, self.symbol_implementation)
+            cached = self.symbol_cache.get(key)
+        except (OSError, UnicodeError):
+            return list(self.get_tags_raw(fname, rel_fname))
+        if cached is not None:
+            return [Tag(rel_fname, fname, line, name, kind) for line, name, kind in cached]
+        data = list(self.get_tags_raw(fname, rel_fname))
+        # Do not persist transient parse failures (empty result), or files changed mid-read.
+        if data and self.io.read_text(fname) == code:
+            self.symbol_cache.put(key, [[t.line, t.name, t.kind] for t in data])
         return data
 
     def _run_captures(self, query: Query, node):
@@ -587,7 +660,10 @@ class RepoMap:
             tuple(sorted(chat_fnames)) if chat_fnames else None,
             tuple(sorted(other_fnames)) if other_fnames else None,
             max_map_tokens,
+            self.scope_paths,
         ]
+        if self.scope_paths == "auto":
+            cache_key.append(tuple(sorted(mentioned_fnames or ())))
 
         if self.refresh == "auto":
             cache_key += [
@@ -652,6 +728,18 @@ class RepoMap:
             mentioned_idents,
             progress=spin.step,
         )
+
+        if self.scope_paths:
+            scopes = self.scope_paths
+            if scopes == "auto":
+                paths = [self.get_rel_fname(f).replace("\\", "/")
+                         for f in set(chat_fnames).union(other_fnames)]
+                seeds = [self.get_rel_fname(f).replace("\\", "/") for f in chat_fnames]
+                seeds.extend(p.replace("\\", "/") for p in mentioned_fnames)
+                scopes = infer_scope(paths, seeds)
+            ranked_tags, self.last_scope_metrics = scope_rank(ranked_tags, scopes)
+            if self.verbose:
+                self.io.tool_output(f"Repo-map scope: {self.last_scope_metrics}")
 
         other_rel_fnames = sorted(set(self.get_rel_fname(fname) for fname in other_fnames))
         special_fnames = filter_important_files(other_rel_fnames)
