@@ -18,6 +18,7 @@ from pygments.token import Token
 from tqdm import tqdm
 from tree_sitter import Query
 
+from aider.repomap_budget import bound_map, read_map_limit
 from aider.dump import dump
 from aider.special import filter_important_files
 from aider.waiting import Spinner
@@ -55,10 +56,13 @@ class RepoMap:
         max_context_window=None,
         map_mul_no_files=8,
         refresh="auto",
+        map_token_limit=None,
     ):
         self.io = io
         self.verbose = verbose
         self.refresh = refresh
+        self.map_token_limit = read_map_limit(map_token_limit)
+        self.last_map_metrics = None
 
         if not root:
             root = os.getcwd()
@@ -108,7 +112,9 @@ class RepoMap:
         mentioned_idents=None,
         force_refresh=False,
     ):
-        if self.max_map_tokens <= 0:
+        started = time.perf_counter()
+        self.last_map_metrics = None
+        if self.max_map_tokens <= 0 or self.map_token_limit == 0:
             return
         if not other_files:
             return
@@ -130,6 +136,9 @@ class RepoMap:
             target = 0
         if not chat_files and self.max_context_window and target > 0:
             max_map_tokens = target
+
+        if self.map_token_limit is not None:
+            max_map_tokens = min(max_map_tokens, self.map_token_limit)
 
         try:
             files_listing = self.get_ranked_tags_map(
@@ -162,7 +171,25 @@ class RepoMap:
         else:
             repo_content = ""
 
-        repo_content += files_listing
+        if self.map_token_limit is not None:
+            repo_content, actual_tokens, clipped = bound_map(
+                repo_content, files_listing, self.map_token_limit, self.main_model.token_count
+            )
+            self.last_map_metrics = {
+                "base_budget": self.max_map_tokens,
+                "effective_budget": max_map_tokens,
+                "hard_limit": self.map_token_limit,
+                "actual_tokens": actual_tokens,
+                "clipped": clipped,
+                "files_considered": len(set(chat_files).union(other_files)),
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+            }
+            if self.verbose:
+                self.io.tool_output(f"Repo-map budget: {self.last_map_metrics}")
+            if not repo_content:
+                return
+        else:
+            repo_content += files_listing
 
         return repo_content
 
