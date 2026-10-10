@@ -30,3 +30,12 @@ git cherry-pick -x <sha>                    # только нужное
 - Удалены апстримные release/docker/pages/schedule-workflow, добавлен `johan-ci.yml`.
 - `johan/jae_smoke.py` — сборка Coder как в JAE без LLM.
 - Черри-пик `975e5a89`: Python 3.13/3.14 (`requires-python <3.15`, numpy 2.x / scipy 1.16+ на Python ≥3.11). CI гоняет 3.12 и 3.13.
+
+## Наши улучшения
+
+- **Режим `search`** (`aider/coders/search_coder.py`). Модель сама ищет файлы для правки:
+  `SEARCH: <regex>` по содержимому и `READ: <path>[:a-b]` по строкам, в цикле до 8 раундов,
+  затем отвечает списком `FILES:`. Только чтение и только git-tracked файлы внутри репо
+  (симлинки наружу не читаются), без shell. Итог — `coder.search_files` и `coder.abs_fnames`.
+  Использование: `Coder.create(..., edit_format="search")`, `coder.run(запрос)`, потом
+  обычный Coder правок с `fnames=coder.search_files`.

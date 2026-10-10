@@ -50,6 +50,9 @@ def main():
     assert hasattr(coder, "partial_response_content")
     assert coder.allowed_to_edit("new_file.py")
     assert git(d, "rev-parse", "HEAD") == head, "auto_commits=False не должен коммитить"
+    search = Coder.create(main_model=model, edit_format="search", io=io, repo=repo, map_tokens=0)
+    assert type(search).__name__ == "SearchCoder", "нет режима search"
+    assert "a.py:1:" in search.tool_search("x = 1")
     print("jae smoke ok")
 
 
