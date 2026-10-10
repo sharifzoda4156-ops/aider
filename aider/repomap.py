@@ -18,6 +18,7 @@ from pygments.token import Token
 from tqdm import tqdm
 from tree_sitter import Query
 
+from aider.repomap_scope import infer_scope, read_scope, scope_rank
 from aider.dump import dump
 from aider.special import filter_important_files
 from aider.waiting import Spinner
@@ -55,10 +56,13 @@ class RepoMap:
         max_context_window=None,
         map_mul_no_files=8,
         refresh="auto",
+        scope_paths=None,
     ):
         self.io = io
         self.verbose = verbose
         self.refresh = refresh
+        self.scope_paths = read_scope(scope_paths)
+        self.last_scope_metrics = None
 
         if not root:
             root = os.getcwd()
@@ -108,6 +112,7 @@ class RepoMap:
         mentioned_idents=None,
         force_refresh=False,
     ):
+        self.last_scope_metrics = None
         if self.max_map_tokens <= 0:
             return
         if not other_files:
@@ -587,7 +592,10 @@ class RepoMap:
             tuple(sorted(chat_fnames)) if chat_fnames else None,
             tuple(sorted(other_fnames)) if other_fnames else None,
             max_map_tokens,
+            self.scope_paths,
         ]
+        if self.scope_paths == "auto":
+            cache_key.append(tuple(sorted(mentioned_fnames or ())))
 
         if self.refresh == "auto":
             cache_key += [
@@ -652,6 +660,18 @@ class RepoMap:
             mentioned_idents,
             progress=spin.step,
         )
+
+        if self.scope_paths:
+            scopes = self.scope_paths
+            if scopes == "auto":
+                paths = [self.get_rel_fname(f).replace("\\", "/")
+                         for f in set(chat_fnames).union(other_fnames)]
+                seeds = [self.get_rel_fname(f).replace("\\", "/") for f in chat_fnames]
+                seeds.extend(p.replace("\\", "/") for p in mentioned_fnames)
+                scopes = infer_scope(paths, seeds)
+            ranked_tags, self.last_scope_metrics = scope_rank(ranked_tags, scopes)
+            if self.verbose:
+                self.io.tool_output(f"Repo-map scope: {self.last_scope_metrics}")
 
         other_rel_fnames = sorted(set(self.get_rel_fname(fname) for fname in other_fnames))
         special_fnames = filter_important_files(other_rel_fnames)
