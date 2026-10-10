@@ -215,6 +215,15 @@ class RepoMap:
 
         return repo_content
 
+    def build_symbol_index(self, relative_paths, **limits):
+        """Explicit opt-in structured views; existing map generation is unchanged."""
+        from aider.symbol_index import build_symbol_index
+
+        # The legacy mtime cache cannot prove content freshness for snapshots.
+        # Shared cache keys include content; otherwise parse the selected files.
+        extract = self.get_shared_tags if self.symbol_cache is not None else self.get_tags_raw
+        return build_symbol_index(self.root, relative_paths, extract, **limits)
+
     def get_rel_fname(self, fname):
         try:
             return os.path.relpath(fname, self.root)
