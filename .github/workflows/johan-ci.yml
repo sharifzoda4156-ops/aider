@@ -5,7 +5,7 @@ name: Johan fork CI
 on:
   push:
     branches: [johan]
-    tags: ["v*+johan.*"]
+    tags: ["v*johan*"]
   pull_request:
     branches: [johan]
   workflow_dispatch:
