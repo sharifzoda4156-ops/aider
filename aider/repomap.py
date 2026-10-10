@@ -1,4 +1,5 @@
 import colorsys
+import hashlib
 import math
 import os
 import random
@@ -18,6 +19,7 @@ from pygments.token import Token
 from tqdm import tqdm
 from tree_sitter import Query
 
+from aider.symbol_cache import SymbolCache, cache_key, parser_identity
 from aider.dump import dump
 from aider.special import filter_important_files
 from aider.waiting import Spinner
@@ -65,6 +67,21 @@ class RepoMap:
         self.root = root
 
         self.load_tags_cache()
+        self.symbol_cache = None
+        self.symbol_parser_identity = None
+        self.symbol_implementation = None
+        shared_dir = os.environ.get("AIDER_SYMBOL_CACHE_DIR")
+        if shared_dir:
+            try:
+                cache_path = Path(shared_dir).expanduser().resolve()
+                if cache_path == Path(self.root).resolve() or Path(self.root).resolve() in cache_path.parents:
+                    raise ValueError("shared cache must be outside the repository")
+                self.symbol_cache = SymbolCache(cache_path)
+                self.symbol_parser_identity = parser_identity()
+                self.symbol_implementation = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+            except (OSError, sqlite3.Error, ValueError):
+                self.symbol_cache = None
+                self.io.tool_warning("Shared symbol cache unavailable; parsing files directly")
         self.cache_threshold = 0.95
 
         self.max_map_tokens = map_tokens
@@ -231,6 +248,8 @@ class RepoMap:
             self.io.tool_warning(f"File not found error: {fname}")
 
     def get_tags(self, fname, rel_fname):
+        if self.symbol_cache is not None:
+            return self.get_shared_tags(fname, rel_fname)
         # Check if the file is in the cache and if the modification time has not changed
         file_mtime = self.get_mtime(fname)
         if file_mtime is None:
@@ -261,6 +280,29 @@ class RepoMap:
             self.tags_cache_error(e)
             self.TAGS_CACHE[cache_key] = {"mtime": file_mtime, "data": data}
 
+        return data
+
+
+    def get_shared_tags(self, fname, rel_fname):
+        # Content is re-read even when mtime is unchanged. Paths are rebound on hits.
+        code = self.io.read_text(fname)
+        lang = filename_to_lang(fname)
+        query_path = get_scm_fname(lang) if lang else None
+        if code is None or not query_path or not query_path.exists():
+            return list(self.get_tags_raw(fname, rel_fname))
+        try:
+            query = query_path.read_text()
+            key = cache_key(code, lang, query, Path(fname).name,
+                            self.symbol_parser_identity, self.symbol_implementation)
+            cached = self.symbol_cache.get(key)
+        except (OSError, UnicodeError):
+            return list(self.get_tags_raw(fname, rel_fname))
+        if cached is not None:
+            return [Tag(rel_fname, fname, line, name, kind) for line, name, kind in cached]
+        data = list(self.get_tags_raw(fname, rel_fname))
+        # Do not persist transient parse failures (empty result), or files changed mid-read.
+        if data and self.io.read_text(fname) == code:
+            self.symbol_cache.put(key, [[t.line, t.name, t.kind] for t in data])
         return data
 
     def _run_captures(self, query: Query, node):
