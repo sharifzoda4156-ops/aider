@@ -16,8 +16,8 @@ jobs:
     timeout-minutes: 30
     strategy:
       matrix:
-        # 3.12 — как VPS JAE. 3.13 добавить вместе с черри-пиком 975e5a89.
-        python-version: ["3.12"]
+        # 3.12 — как VPS JAE; 3.13 — поддержка из апстрима (975e5a89).
+        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
         with:
