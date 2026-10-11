@@ -52,6 +52,23 @@ from retained tags, not the number of unknown/unparsed symbols. Input enumeratio
 is bounded even if duplicate paths are supplied indefinitely. These are not token
 or wall-clock limits; apply a tokenizer/timeout in the consuming service.
 
+With the shared cache enabled, structured extraction enumerates at most
+`max_symbols_per_file + 1` tags before building a list. The extra tag is only
+lookahead for reporting `truncated`; it is not retained in the index. Duplicate
+and invalid tags still count toward enumeration. Complete nonempty results can
+populate the cache, including results exactly at the cap. Truncated prefixes
+are never cached as complete results. A full cache hit is sliced before tags
+are rebound to the current workspace, without replacing the full entry.
+
+The internal `get_shared_tags(..., max_tags=None)` default remains unlimited
+for ordinary repo maps. Only explicit structured-index calls pass their cap.
+This bounds tag enumeration/materialization in the cache adapter, not the
+parser's internal tree, capture arrays, or lexer work before it yields a tag.
+Cache hits still deserialize a complete JSON entry under the existing 2 MiB
+payload ceiling. File-byte limits and caller-owned process/time/memory limits
+remain necessary. Changing the repo-map implementation invalidates previous
+shared-cache keys, as defined in PR #6.
+
 ## Honest coverage and next integration
 
 `extracted` means existing Aider machinery emitted symbols, not that extraction
@@ -77,3 +94,12 @@ mutation during extraction, deletion, symlinks, traversal, unknown coverage and
 clone-stable identifiers. Two full-dependency integration tests exercise real
 Python/JavaScript queries, the legacy-cache bypass and shared cache reuse.
 No paid model or live Serper benchmark is involved.
+
+The bounded-cache regression suite adds nine stdlib tests, including cold and
+warm caches, default/exact caps, duplicates, fallback errors, unknown output,
+mutation and cache poisoning prevention. A real-parser integration test covers
+Python and JavaScript, replaying one real parser stream for capped cached/uncached snapshots and checking
+that ordinary full extraction and later larger views still work.
+The inherited parser does not promise capture order across separate parses;
+bounded prefixes may differ between those parses. This patch does not add
+deterministic ranking or complete extraction guarantees.

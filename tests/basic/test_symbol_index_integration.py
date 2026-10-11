@@ -11,6 +11,55 @@ from aider.symbol_index import StaleSymbolIndex
 
 
 class TestSymbolIndexIntegration(unittest.TestCase):
+    def test_real_parser_cache_caps_are_equivalent_to_uncached_extraction(self):
+        for language, filename, source in (
+            ('python', 'api.py', '\n'.join(f'def func{i}(): return {i}' for i in range(8))),
+            ('javascript', 'api.js', '\n'.join(
+                f'export function func{i}() {{ return func{(i + 1) % 8}(); }}'
+                for i in range(8))),
+        ):
+            with self.subTest(language=language), tempfile.TemporaryDirectory() as d:
+                root = Path(d); repo = root / 'repo'; repo.mkdir()
+                path = repo / filename
+                path.write_text(source)
+                with patch.dict(os.environ, {'AIDER_SYMBOL_CACHE_DIR': str(root / 'cache')}):
+                    io = SimpleNamespace(read_text=lambda p: Path(p).read_text(),
+                                         tool_output=lambda *a: None, tool_warning=lambda *a: None)
+                    rm = RepoMap(root=str(repo), io=io, main_model=None)
+                    try:
+                        # Tree-sitter capture order is not guaranteed across parses.
+                        # Replay one real extraction to isolate adapter equivalence.
+                        real_tags = tuple(rm.get_tags_raw(str(path), filename))
+                        self.assertGreater(len(real_tags), 3)
+                        consumed = []
+                        def observed(*args):
+                            for tag in real_tags:
+                                consumed.append(tag)
+                                yield tag
+                        with patch.object(rm, 'get_tags_raw', observed):
+                            capped = rm.build_symbol_index([filename], max_symbols_per_file=2)
+                        self.assertEqual(len(consumed), 3)
+                        self.assertEqual(capped.files[0].coverage, 'truncated')
+                        self.assertEqual(rm.symbol_cache.stats['writes'], 0)
+                        with patch.object(rm, 'symbol_cache', None):
+                            with patch.object(rm, 'get_tags_raw', return_value=iter(real_tags)):
+                                uncached = rm.build_symbol_index([filename], max_symbols_per_file=2)
+                        self.assertEqual(capped.snapshot_id, uncached.snapshot_id)
+                        # Ordinary map extraction is still complete and can populate the cache.
+                        with patch.object(rm, 'get_tags_raw', return_value=iter(real_tags)):
+                            all_tags = rm.get_tags(str(path), filename)
+                        self.assertGreater(len(all_tags), 3)
+                        self.assertEqual(rm.symbol_cache.stats['writes'], 1)
+                        with patch.object(rm, 'get_tags_raw', side_effect=AssertionError('cache miss')):
+                            hit = rm.build_symbol_index([filename], max_symbols_per_file=2)
+                            full = rm.build_symbol_index([filename], max_symbols_per_file=256)
+                        self.assertEqual(hit.snapshot_id, capped.snapshot_id)
+                        self.assertEqual(full.files[0].coverage, 'extracted')
+                        self.assertGreater(len(full.files[0].symbols), len(hit.files[0].symbols))
+                        self.assertEqual(rm.symbol_cache.stats['writes'], 1)
+                    finally:
+                        rm.TAGS_CACHE.close()
+
     def test_real_parser_shared_views_and_fresh_content_without_shared_cache(self):
         with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {}, clear=True):
             root = Path(d)

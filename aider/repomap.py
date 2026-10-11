@@ -10,6 +10,7 @@ import time
 import warnings
 from collections import Counter, defaultdict, namedtuple
 from importlib import resources
+from itertools import islice
 from pathlib import Path
 
 from diskcache import Cache
@@ -221,7 +222,13 @@ class RepoMap:
 
         # The legacy mtime cache cannot prove content freshness for snapshots.
         # Shared cache keys include content; otherwise parse the selected files.
-        extract = self.get_shared_tags if self.symbol_cache is not None else self.get_tags_raw
+        def extract(fname, rel_fname):
+            if self.symbol_cache is not None:
+                return self.get_shared_tags(
+                    fname, rel_fname, max_tags=limits.get("max_symbols_per_file", 2048)
+                )
+            return self.get_tags_raw(fname, rel_fname)
+
         return build_symbol_index(self.root, relative_paths, extract, **limits)
 
     def get_rel_fname(self, fname):
@@ -323,25 +330,41 @@ class RepoMap:
 
         return data
 
-    def get_shared_tags(self, fname, rel_fname):
+    def get_shared_tags(self, fname, rel_fname, *, max_tags=None):
+        # Structured indexes need one lookahead tag to distinguish exact from
+        # truncated extraction. Ordinary repo maps retain unlimited enumeration.
+        if max_tags is not None and (type(max_tags) is not int or max_tags <= 0):
+            raise ValueError("max_tags must be a positive integer")
+
+        def read_tags():
+            tags = self.get_tags_raw(fname, rel_fname)
+            if max_tags is not None:
+                tags = islice(tags, max_tags + 1)
+            return list(tags)
+
         # Content is re-read even when mtime is unchanged. Paths are rebound on hits.
         code = self.io.read_text(fname)
         lang = filename_to_lang(fname)
         query_path = get_scm_fname(lang) if lang else None
         if code is None or not query_path or not query_path.exists():
-            return list(self.get_tags_raw(fname, rel_fname))
+            return read_tags()
         try:
             query = query_path.read_text()
             key = cache_key(code, lang, query, Path(fname).name,
                             self.symbol_parser_identity, self.symbol_implementation)
             cached = self.symbol_cache.get(key)
         except (OSError, UnicodeError):
-            return list(self.get_tags_raw(fname, rel_fname))
+            return read_tags()
         if cached is not None:
+            if max_tags is not None:
+                cached = cached[:max_tags + 1]
             return [Tag(rel_fname, fname, line, name, kind) for line, name, kind in cached]
-        data = list(self.get_tags_raw(fname, rel_fname))
+        data = read_tags()
+        # Only cache complete results: a prefix must never masquerade as full
+        # extraction on a later, larger request or an ordinary repo map.
+        complete = max_tags is None or len(data) <= max_tags
         # Do not persist transient parse failures (empty result), or files changed mid-read.
-        if data and self.io.read_text(fname) == code:
+        if data and complete and self.io.read_text(fname) == code:
             self.symbol_cache.put(key, [[t.line, t.name, t.kind] for t in data])
         return data
 
