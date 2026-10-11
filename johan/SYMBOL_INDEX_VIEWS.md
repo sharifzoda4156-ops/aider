@@ -98,5 +98,8 @@ No paid model or live Serper benchmark is involved.
 The bounded-cache regression suite adds nine stdlib tests, including cold and
 warm caches, default/exact caps, duplicates, fallback errors, unknown output,
 mutation and cache poisoning prevention. A real-parser integration test covers
-Python and JavaScript, comparing capped cached/uncached snapshots and checking
+Python and JavaScript, replaying one real parser stream for capped cached/uncached snapshots and checking
 that ordinary full extraction and later larger views still work.
+The inherited parser does not promise capture order across separate parses;
+bounded prefixes may differ between those parses. This patch does not add
+deterministic ranking or complete extraction guarantees.

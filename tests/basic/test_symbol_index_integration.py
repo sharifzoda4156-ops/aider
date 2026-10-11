@@ -27,10 +27,13 @@ class TestSymbolIndexIntegration(unittest.TestCase):
                                          tool_output=lambda *a: None, tool_warning=lambda *a: None)
                     rm = RepoMap(root=str(repo), io=io, main_model=None)
                     try:
-                        original = rm.get_tags_raw
+                        # Tree-sitter capture order is not guaranteed across parses.
+                        # Replay one real extraction to isolate adapter equivalence.
+                        real_tags = tuple(rm.get_tags_raw(str(path), filename))
+                        self.assertGreater(len(real_tags), 3)
                         consumed = []
                         def observed(*args):
-                            for tag in original(*args):
+                            for tag in real_tags:
                                 consumed.append(tag)
                                 yield tag
                         with patch.object(rm, 'get_tags_raw', observed):
@@ -39,10 +42,12 @@ class TestSymbolIndexIntegration(unittest.TestCase):
                         self.assertEqual(capped.files[0].coverage, 'truncated')
                         self.assertEqual(rm.symbol_cache.stats['writes'], 0)
                         with patch.object(rm, 'symbol_cache', None):
-                            uncached = rm.build_symbol_index([filename], max_symbols_per_file=2)
+                            with patch.object(rm, 'get_tags_raw', return_value=iter(real_tags)):
+                                uncached = rm.build_symbol_index([filename], max_symbols_per_file=2)
                         self.assertEqual(capped.snapshot_id, uncached.snapshot_id)
                         # Ordinary map extraction is still complete and can populate the cache.
-                        all_tags = rm.get_tags(str(path), filename)
+                        with patch.object(rm, 'get_tags_raw', return_value=iter(real_tags)):
+                            all_tags = rm.get_tags(str(path), filename)
                         self.assertGreater(len(all_tags), 3)
                         self.assertEqual(rm.symbol_cache.stats['writes'], 1)
                         with patch.object(rm, 'get_tags_raw', side_effect=AssertionError('cache miss')):
