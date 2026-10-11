@@ -81,19 +81,44 @@ class SymbolIndex:
                 changed.append(entry.path)
         return {"valid": not changed, "changed_files": changed, "snapshot_id": self.snapshot_id}
 
-    def view(self, role, max_symbols=256):
+    def view(self, role, max_symbols=256, *, prefer_definitions=False):
         if role not in ("planner", "executor"):
             raise ValueError("role must be planner or executor")
         _positive(max_symbols, "max_symbols")
+        if type(prefer_definitions) is not bool:
+            raise ValueError("prefer_definitions must be a boolean")
+        if prefer_definitions and role != "executor":
+            raise ValueError("prefer_definitions is only supported for executor views")
         if not self.validate()["valid"]:
             raise StaleSymbolIndex("repository files changed; rebuild symbol index")
         remaining = max_symbols
+        prioritized = None
+        if prefer_definitions:
+            # Scan the already bounded index, reserving the global budget for
+            # definitions across all selected files before lexical references.
+            prioritized = [[] for _ in self.files]
+            for kind in ("def", "ref"):
+                if not remaining:
+                    break
+                for file_number, entry in enumerate(self.files):
+                    if not remaining:
+                        break
+                    for symbol in entry.symbols:
+                        if symbol[2] != kind:
+                            continue
+                        prioritized[file_number].append(symbol)
+                        remaining -= 1
+                        if not remaining:
+                            break
         records = []
         omitted_symbols = 0
-        for entry in self.files:
+        for file_number, entry in enumerate(self.files):
             wanted = [s for s in entry.symbols if role == "executor" or s[2] == "def"]
-            selected = wanted[:remaining]
-            remaining -= len(selected)
+            if prioritized is None:
+                selected = wanted[:remaining]
+                remaining -= len(selected)
+            else:
+                selected = prioritized[file_number]
             omitted_symbols += len(wanted) - len(selected)
             record = {"path": entry.path, "content_sha256": entry.content_sha256,
                       "coverage": entry.coverage}
@@ -103,13 +128,16 @@ class SymbolIndex:
                 record["symbols"] = [{"name": name, "line": line, "kind": kind}
                                      for line, name, kind in selected]
             records.append(record)
-        return {"schema_version": 1, "snapshot_id": self.snapshot_id, "role": role,
+        result = {"schema_version": 1, "snapshot_id": self.snapshot_id, "role": role,
                 "files": records, "omitted_files": self.omitted_files,
                 "omitted_symbols": omitted_symbols,
                 "limitations": ["definitions are not proven public APIs or contracts",
                                 "references are lexical candidates, not resolved calls",
                                 "empty extraction does not prove absence of symbols",
                                 "validation covers selected files, not the entire repository"]}
+        if prefer_definitions:
+            result["selection_policy"] = "definitions_first"
+        return result
 
 
 def build_symbol_index(root, paths, extract, *, max_files=128, max_file_bytes=1024 * 1024,

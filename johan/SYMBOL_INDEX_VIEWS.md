@@ -15,6 +15,8 @@ index = repo_map.build_symbol_index(
 )
 planner = index.view("planner", max_symbols=256)
 executor = index.view("executor", max_symbols=512)
+# Optional projection only: reserve the same symbol-count budget for definitions.
+executor_definitions_first = index.view("executor", max_symbols=512, prefer_definitions=True)
 ```
 
 Extraction runs once. Both outputs carry the same `snapshot_id`, selected file
@@ -23,6 +25,25 @@ locations of definitions; executor receives definitions and lexical references.
 Source bodies and absolute workspace paths are excluded. Symbols themselves
 are code-derived data and must still follow the caller's access policy.
 Lines are one-based; lexer references without a location use JSON null.
+
+`prefer_definitions=False` preserves the existing output and source/file order.
+With `True`, the executor selects definitions across all retained files first,
+then lexical references from the remaining budget. Within each kind, selection
+uses the existing file and retained-symbol order. Per-file output puts selected
+definitions before references and includes `selection_policy: definitions_first`
+at the top level. The boolean is keyword-only; invalid values and opting in for
+planner views raise `ValueError`. Planner already filters to definitions.
+
+Both projections use the same existing index and `snapshot_id`; no parser or
+model is called again. `max_symbols` remains a global count cap, including both
+kinds, and `omitted_symbols` still counts excluded retained symbols. Empty file
+records, hashes, locations and extraction coverage are preserved. This policy
+cannot recover definitions lost to extraction truncation or unknown coverage.
+It does not ensure fair representation of every file, task relevance or proven
+public contracts. Useful references may be displaced; the opt-in tradeoff needs
+future independent task acceptance. A symbol count is not a token budget: the
+consumer must still enforce its actual tokenizer and response size limits.
+No CLI flag, environment default or JAE/backend integration is added.
 
 The snapshot ID hashes retained symbols, paths, coverage and file contents. It
 is not a Git SHA, repository identity, user identity or authorization credential.
@@ -103,3 +124,8 @@ that ordinary full extraction and later larger views still work.
 The inherited parser does not promise capture order across separate parses;
 bounded prefixes may differ between those parses. This patch does not add
 deterministic ranking or complete extraction guarantees.
+
+Nine stdlib definition-priority regressions cover default compatibility, later
+files, remaining reference budget, definition overflow, unknown locations,
+unknown/truncated extraction, duplicates, stale content and invalid options.
+A real Python/JavaScript integration test projects one index without reparsing.
