@@ -7,7 +7,8 @@ on:
     branches: [johan]
     tags: ["v*johan*"]
   pull_request:
-    branches: [johan]
+    # Also validate drafts stacked on the repo-map integration candidate.
+    branches: [johan, codex/repomap-integrated]
   workflow_dispatch:
 
 jobs:
