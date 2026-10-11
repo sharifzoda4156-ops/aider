@@ -11,6 +11,32 @@ from aider.symbol_index import StaleSymbolIndex
 
 
 class TestSymbolIndexIntegration(unittest.TestCase):
+    def test_definition_priority_projects_real_multilanguage_index_without_reparse(self):
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {}, clear=True):
+            root = Path(d)
+            (root / 'api.py').write_text(
+                'def get_value():\n    return helper()\n\ndef helper():\n    return 1\n')
+            (root / 'ui.js').write_text(
+                'export function renderView(value) { return value; }\n')
+            io = SimpleNamespace(read_text=lambda p: Path(p).read_text(),
+                                 tool_output=lambda *a: None, tool_warning=lambda *a: None)
+            rm = RepoMap(root=d, io=io, main_model=None)
+            try:
+                index = rm.build_symbol_index(['api.py', 'ui.js'])
+                with patch.object(rm, 'get_tags_raw', side_effect=AssertionError('unexpected parse')):
+                    planner = index.view('planner')
+                    view = index.view('executor', 3, prefer_definitions=True)
+                symbols = [s for f in view['files'] for s in f['symbols']]
+                self.assertEqual({s['name'] for s in symbols},
+                                 {'get_value', 'helper', 'renderView'})
+                self.assertTrue(all(s['kind'] == 'def' for s in symbols))
+                self.assertEqual(view['snapshot_id'], planner['snapshot_id'])
+                retained = sum(len(f.symbols) for f in index.files)
+                self.assertEqual(view['omitted_symbols'], retained - 3)
+                self.assertEqual(view['selection_policy'], 'definitions_first')
+            finally:
+                rm.TAGS_CACHE.close()
+
     def test_real_parser_cache_caps_are_equivalent_to_uncached_extraction(self):
         for language, filename, source in (
             ('python', 'api.py', '\n'.join(f'def func{i}(): return {i}' for i in range(8))),
